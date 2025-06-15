@@ -1,4 +1,10 @@
 import requests
+import pandas as pd
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import TfidfVectorizer
+import random
+import os
 
 # API Keys
 YOUTUBE_API_KEY = "AIzaSyAXeIl50ORTg9nLhpOUV0GsNxeWxsvN3gg"
@@ -25,6 +31,52 @@ ARTICLE_RECOMMENDATIONS = {
     "depression": "mental health blogs on depression",
     "normal": "positive and self-care blogs"
 }
+
+# Load professionals dataset
+try:
+    csv_path = os.path.join(os.path.dirname(__file__), "Final professionals dataset.csv")
+    professionals_df = pd.read_csv(csv_path)
+    professionals_df['combined_text'] = professionals_df.apply(
+        lambda x: f"{x['Name']} {x['Profession']} {x['Experience']} {x['Location']} {x['Education']}",
+        axis=1
+    )
+    vectorizer = TfidfVectorizer(stop_words='english')
+    tfidf_matrix = vectorizer.fit_transform(professionals_df['combined_text'])
+    print(f"Professionals loaded: {professionals_df.shape}")
+    print(f"Sample professional: {professionals_df.iloc[0].to_dict()}")
+except Exception as e:
+    print(f"Error loading professionals dataset: {e}")
+    professionals_df = None
+    tfidf_matrix = None
+
+# Add a global index to rotate professionals
+_prof_index = 0
+
+def get_recommended_professionals():
+    global _prof_index
+    if professionals_df is None:
+        return []
+    n = len(professionals_df)
+    if n == 0:
+        return []
+    # Get 3 professionals, rotating through the list
+    start = _prof_index % n
+    indices = [(start + i) % n for i in range(3)]
+    _prof_index = (_prof_index + 3) % n
+    def safe_get(prof, col):
+        return prof[col] if col in prof and pd.notnull(prof[col]) else 'N/A'
+    professionals = []
+    for idx in indices:
+        professional = professionals_df.iloc[idx]
+        professionals.append({
+            'name': safe_get(professional, 'Name'),
+            'profession': safe_get(professional, 'Profession'),
+            'experience': safe_get(professional, 'Experience'),
+            'education': safe_get(professional, 'Education'),
+            'location': safe_get(professional, 'Location'),
+            'contact': safe_get(professional, 'To book appointments visit')
+        })
+    return professionals
 
 # Internet Check
 def check_internet():
@@ -97,7 +149,7 @@ def map_sentiment_to_condition(sentiment_counts):
         return 'stress'  # neutral or mixed case
 
 # ✅ Main Recommendation Function for Flask Integration
-def generate_recommendations(sentiment_counts, avg_sentiment_score):
+def generate_recommendations(sentiment_counts, avg_sentiment_score, phq9_scores=None, gad7_scores=None):
     if not check_internet():
         return {"error": "No internet connection"}
 
@@ -110,7 +162,6 @@ def generate_recommendations(sentiment_counts, avg_sentiment_score):
     elif dominant == "positive":
         condition = "normal"
     elif dominant == "negative":
-        # Use avg_sentiment_score to distinguish further
         if avg_sentiment_score < -0.6:
             condition = "depression"
         elif avg_sentiment_score < -0.2:
@@ -118,23 +169,39 @@ def generate_recommendations(sentiment_counts, avg_sentiment_score):
         else:
             condition = "stress"
     else:
-        condition = "stress"  # Default fallback
+        condition = "stress"
 
-    # Step 3: Fetch recommendations
     recommendations = {
         "condition": condition,
         "music": [],
         "exercise": [],
-        "articles": []
+        "articles": [],
+        "professionals": get_recommended_professionals()  # Always get professionals
     }
 
-    if condition in MUSIC_RECOMMENDATIONS:
-        recommendations["music"] = fetch_youtube_videos(MUSIC_RECOMMENDATIONS[condition])
+    # Always fetch categories for the detected condition, fallback to 'normal' if needed
+    music_query = MUSIC_RECOMMENDATIONS.get(condition) or MUSIC_RECOMMENDATIONS.get('normal')
+    exercise_query = EXERCISE_RECOMMENDATIONS.get(condition) or EXERCISE_RECOMMENDATIONS.get('normal')
+    article_query = ARTICLE_RECOMMENDATIONS.get(condition) or ARTICLE_RECOMMENDATIONS.get('normal')
 
-    if condition in EXERCISE_RECOMMENDATIONS:
-        recommendations["exercise"] = fetch_youtube_videos(EXERCISE_RECOMMENDATIONS[condition])
+    recommendations["music"] = fetch_youtube_videos(music_query)
+    if not recommendations["music"] or recommendations["music"][0].get('url') == '#':
+        recommendations["music"] = [{"title": "Relaxing Piano Music", "url": "https://www.youtube.com/watch?v=1ZYbU82GVz4", "type": "music"}]
 
-    if condition in ARTICLE_RECOMMENDATIONS:
-        recommendations["articles"] = fetch_articles(ARTICLE_RECOMMENDATIONS[condition])
+    recommendations["exercise"] = fetch_youtube_videos(exercise_query)
+    if not recommendations["exercise"] or recommendations["exercise"][0].get('url') == '#':
+        recommendations["exercise"] = [{"title": "Breathing Exercise for Stress Relief", "url": "https://www.youtube.com/watch?v=nmFUDkj1Aq0", "type": "exercise"}]
+
+    recommendations["articles"] = fetch_articles(article_query)
+    if not recommendations["articles"] or recommendations["articles"][0].get('link') == '#':
+        recommendations["articles"] = [{"title": "How to Manage Stress", "link": "https://www.helpguide.org/articles/stress/stress-management.htm", "type": "article"}]
+
+    # Add type field to each recommendation
+    for rec in recommendations["music"]:
+        rec["type"] = "music"
+    for rec in recommendations["exercise"]:
+        rec["type"] = "exercise"
+    for rec in recommendations["articles"]:
+        rec["type"] = "article"
 
     return recommendations

@@ -6,11 +6,13 @@ from firebase_admin import credentials, firestore
 import re
 import uuid
 from recommendation_engine import generate_recommendations
+import os
 
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app, supports_credentials=True)
+# Update CORS configuration to allow requests from your frontend
+CORS(app, resources={r"/*": {"origins": ["http://192.168.1.13:3001", "http://localhost:3001", "http://localhost:3000"]}}, supports_credentials=True)
 
 
 #app = Flask(__name__)
@@ -151,45 +153,71 @@ def chat():
 
 @app.route("/end-session", methods=["POST"])
 def end_session():
-    global conversation_id, conversation_log, sentiment_scores, sentiment_counts
+    try:
+        global conversation_id, conversation_log, sentiment_scores, sentiment_counts
 
-    # Calculate average sentiment score
-    average_sentiment = sum(sentiment_scores) / len(sentiment_scores) if sentiment_scores else 0
+        # Get PHQ-9 and GAD-7 scores from request
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
 
-    # Save the conversation to Firestore
-    db.collection("chatbot_conversations").document(conversation_id).set({
-        "conversation_id": conversation_id,
-        "messages": conversation_log,
-        "sentiment_counts": sentiment_counts,
-        "average_sentiment_score": average_sentiment
-    })
+        phq9_scores = data.get("phq9_scores", [])
+        gad7_scores = data.get("gad7_scores", [])
+        # DSM-5/assessment results (optional)
+        dsm5_results = data.get("dsm5_results", {})
 
-    # Filter keys to ensure only expected ones are passed
-    filtered_sentiment_counts = {
-        k: sentiment_counts.get(k, 0) for k in ["positive", "neutral", "negative"]
-    }
+        # Calculate average sentiment score
+        average_sentiment = sum(sentiment_scores) / len(sentiment_scores) if sentiment_scores else 0
 
-    # Generate full recommendation object
-    rec_obj = generate_recommendations(filtered_sentiment_counts, average_sentiment)
+        # Save the conversation to Firestore
+        db.collection("chatbot_conversations").document(conversation_id).set({
+            "conversation_id": conversation_id,
+            "messages": conversation_log,
+            "sentiment_counts": sentiment_counts,
+            "average_sentiment_score": average_sentiment,
+            "phq9_scores": phq9_scores,
+            "gad7_scores": gad7_scores,
+            "dsm5_results": dsm5_results
+        })
 
-    # Flatten links
-    all_recommendations = rec_obj["music"] + rec_obj["exercise"] + rec_obj["articles"]
+        # Filter keys to ensure only expected ones are passed
+        filtered_sentiment_counts = {
+            k: sentiment_counts.get(k, 0) for k in ["positive", "neutral", "negative"]
+        }
 
-    result = {
-        "message": "Conversation saved.",
-        "sentiment_counts": sentiment_counts,
-        "average_sentiment_score": average_sentiment,
-        "recommendations": all_recommendations,
-        "condition": rec_obj["condition"]
-    }
+        # Generate full recommendation object
+        rec_obj = generate_recommendations(
+            filtered_sentiment_counts, 
+            average_sentiment,
+            phq9_scores,
+            gad7_scores
+        )
 
-    # Reset session variables
-    conversation_id = str(uuid.uuid4())
-    conversation_log = []
-    sentiment_scores = []
-    sentiment_counts = {"positive": 0, "neutral": 0, "negative": 0}
+        # Flatten links
+        all_recommendations = rec_obj["music"] + rec_obj["exercise"] + rec_obj["articles"]
 
-    return jsonify(result), 200
+        result = {
+            "message": "Conversation saved.",
+            "sentiment_counts": sentiment_counts,
+            "average_sentiment_score": average_sentiment,
+            "recommendations": all_recommendations,
+            "condition": rec_obj["condition"],
+            "mental_health_score": rec_obj.get("mental_health_score"),
+            "professionals": rec_obj.get("professionals", []),
+            "dsm5_results": dsm5_results
+        }
+
+        # Reset session variables
+        conversation_id = str(uuid.uuid4())
+        conversation_log = []
+        sentiment_scores = []
+        sentiment_counts = {"positive": 0, "neutral": 0, "negative": 0}
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        print(f"Error in end_session: {str(e)}")  # Log the error
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/generate-recommendations", methods=["POST"])
 def generate_recommendations_route():
